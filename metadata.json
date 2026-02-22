@@ -1,0 +1,5 @@
+{
+  "name": "Money Alarm",
+  "description": "Real-time cryptocurrency price monitoring with automated take-profit alarms.",
+  "requestFramePermissions": []
+}
