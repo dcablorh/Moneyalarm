@@ -80,7 +80,7 @@ export default function App() {
       if (totalZeros >= 4) {
         return (
           <span className={`${colorClass} ${fontSize} font-black leading-none tracking-tight`}>
-            $0.0<sub className="text-[0.5em] leading-none align-baseline mx-0.5 font-black">{totalZeros - 1}</sub>{digits}
+            $0.0<sub className="text-[0.5em] leading-none align-baseline mx-0.5 font-black">{totalZeros }</sub>{digits}
           </span>
         );
       }
