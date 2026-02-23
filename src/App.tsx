@@ -4,8 +4,10 @@ import { Bell, BellOff, TrendingUp, AlertCircle, Trash2, Plus, Play, Pause, Refr
 
 interface Alert {
   id: string;
-  cmcId?: number;
+  coinId: string;
   symbol: string;
+  name: string;
+  image: string;
   targetPrice: number;
   currentPrice: number | null;
   isActive: boolean;
@@ -27,7 +29,14 @@ const AVAILABLE_SOUNDS = [
 ];
 
 export default function App() {
-  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [alerts, setAlerts] = useState<Alert[]>(() => {
+    try {
+      const saved = localStorage.getItem('crypto_alerts');
+      return saved ? (JSON.parse(saved) as Alert[]) : [];
+    } catch {
+      return [];
+    }
+  });
   const [newSymbol, setNewSymbol] = useState('');
   const [newTarget, setNewTarget] = useState('');
   const [selectedSound, setSelectedSound] = useState(AVAILABLE_SOUNDS[0].url);
@@ -38,6 +47,9 @@ export default function App() {
   const [isCreating, setIsCreating] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  // Ref so the polling interval always reads the latest alerts without restarting
+  const alertsRef = useRef(alerts);
+  alertsRef.current = alerts;
 
   const renderPrice = (price: number | null, colorClass: string = "text-[#1A1C1E]") => {
     if (price === null) return <span className={`${colorClass} text-[22px]`}>---</span>;
@@ -101,65 +113,50 @@ export default function App() {
     }
   }, [ringingAlertId, isAudioEnabled, alerts]);
 
-  // Load alerts from localStorage on mount
-  useEffect(() => {
-    const saved = localStorage.getItem('crypto_alerts');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        setAlerts(parsed);
-      } catch (e) {
-        console.error("Failed to parse saved alerts", e);
-      }
-    }
-  }, []);
-
-  // Save alerts to localStorage whenever they change
+  // Persist alerts to localStorage on every change.
+  // Initial value is loaded synchronously via the lazy useState initializer above,
+  // so this effect never overwrites saved data with [] on first render.
   useEffect(() => {
     localStorage.setItem('crypto_alerts', JSON.stringify(alerts));
   }, [alerts]);
 
-  // Polling logic - Reduced to 5 seconds for "real-time" feel
+  // Batch polling — fetch all active alert prices in ONE API call every 30 seconds
   useEffect(() => {
-    const interval = setInterval(() => {
-      alerts.forEach(alert => {
-        if (alert.isActive && !alert.isTriggered) {
-          fetchPrice(alert);
-        }
-      });
-    }, 5000); 
+    const fetchAllPrices = async () => {
+      const activeAlerts = alertsRef.current.filter(a => a.isActive && !a.isTriggered);
+      if (activeAlerts.length === 0) return;
 
-    return () => clearInterval(interval);
-  }, [alerts]);
+      const ids = activeAlerts.map(a => a.coinId).join(',');
+      try {
+        const response = await fetch(`/api/prices?ids=${encodeURIComponent(ids)}`);
+        if (!response.ok) return;
+        const priceMap: Record<string, { price: number; lastUpdated: string }> = await response.json();
 
-  const fetchPrice = async (alert: Alert) => {
-    try {
-      const response = await fetch(`/api/price/${alert.symbol}`);
-      if (!response.ok) throw new Error('Failed to fetch price');
-      const data = await response.json();
-      
-      const currentPrice = data.price;
-      const isTriggered = currentPrice >= alert.targetPrice;
+        setAlerts(prev => prev.map(a => {
+          if (!a.isActive || a.isTriggered) return a;
+          const data = priceMap[a.coinId];
+          if (!data) return a;
 
-      setAlerts(prev => prev.map(a => {
-        if (a.id === alert.id) {
-          const newlyTriggered = isTriggered && !a.isTriggered;
-          if (newlyTriggered) {
+          const isTriggered = data.price >= a.targetPrice;
+          if (isTriggered && !a.isTriggered) {
             setRingingAlertId(a.id);
           }
           return {
             ...a,
-            currentPrice,
+            currentPrice: data.price,
             isTriggered: isTriggered || a.isTriggered,
-            lastUpdated: new Date().toLocaleTimeString()
+            lastUpdated: new Date().toLocaleTimeString(),
           };
-        }
-        return a;
-      }));
-    } catch (err) {
-      console.error(`Error fetching price for ${alert.symbol}:`, err);
-    }
-  };
+        }));
+      } catch (err) {
+        console.error('Error fetching prices:', err);
+      }
+    };
+
+    fetchAllPrices(); // fetch immediately on mount
+    const interval = setInterval(fetchAllPrices, 30000);
+    return () => clearInterval(interval);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const stopAlarm = () => {
     setRingingAlertId(null);
@@ -189,21 +186,22 @@ export default function App() {
     setError(null);
     setSuccessMessage(null);
     setIsCreating(true);
-    const symbol = newSymbol.toUpperCase();
 
-    // Check if symbol exists and get initial price
+    // Check if token exists and get initial price (accepts name or symbol)
     try {
-      const response = await fetch(`/api/price/${symbol}`);
+      const response = await fetch(`/api/price/${encodeURIComponent(newSymbol.trim())}`);
       if (!response.ok) {
         const errData = await response.json();
-        throw new Error(errData.error || "Symbol not found");
+        throw new Error(errData.error || "Token not found");
       }
       const data = await response.json();
 
       const newAlert: Alert = {
         id: Math.random().toString(36).substr(2, 9),
-        cmcId: data.id,
-        symbol,
+        coinId: data.id,
+        symbol: data.symbol,
+        name: data.name,
+        image: data.image || '',
         targetPrice: target,
         currentPrice: data.price,
         isActive: true,
@@ -220,7 +218,7 @@ export default function App() {
       setNewSymbol('');
       setNewTarget('');
       setIsSuccess(true);
-      setSuccessMessage(`Alert for ${symbol} created successfully!`);
+      setSuccessMessage(`Alert for ${data.symbol} created successfully!`);
       setTimeout(() => {
         setSuccessMessage(null);
         setIsSuccess(false);
@@ -302,10 +300,10 @@ export default function App() {
         >
           <div className="space-y-8">
             <div className="space-y-3">
-              <label className="text-[11px] font-bold uppercase tracking-widest text-[#8E9297] ml-1">Asset Symbol</label>
+              <label className="text-[11px] font-bold uppercase tracking-widest text-[#8E9297] ml-1">Token Name or Symbol</label>
               <input 
                 type="text" 
-                placeholder="BTC, ETH, SOL..." 
+                placeholder="Bitcoin, BTC, Ethereum..." 
                 value={newSymbol}
                 onChange={(e) => setNewSymbol(e.target.value)}
                 className="w-full bg-[#F1F3F5] border-none rounded-2xl px-6 py-5 focus:ring-2 focus:ring-emerald-500/20 transition-all placeholder:text-[#ADB5BD] text-base font-medium"
@@ -411,7 +409,7 @@ export default function App() {
                 </span>
                 <span className="text-[10px] font-black text-[#00F2B5] uppercase tracking-wider">Live</span>
               </div>
-              <span className="text-[11px] font-medium text-[#ADB5BD]">Every 5s</span>
+              <span className="text-[11px] font-medium text-[#ADB5BD]">Every 30s</span>
             </div>
           </div>
 
@@ -442,12 +440,12 @@ export default function App() {
                   <div className="flex justify-between items-start mb-8">
                     <div className="flex items-center gap-5">
                       <div className="w-16 h-16 rounded-2xl bg-[#F1F3F5] flex items-center justify-center overflow-hidden border border-[#E9ECEF]">
-                        {alert.cmcId ? (
+                        {alert.image ? (
                           <img 
-                            src={`https://s2.coinmarketcap.com/static/img/coins/64x64/${alert.cmcId}.png`} 
+                            src={alert.image} 
                             alt={alert.symbol}
                             className="w-10 h-10 object-contain"
-                            referrerPolicy="no-referrer"
+                            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
                           />
                         ) : (
                           <span className="font-black text-2xl text-[#1A1C1E]">
@@ -457,6 +455,7 @@ export default function App() {
                       </div>
                       <div>
                         <h3 className="text-3xl font-black text-[#1A1C1E] tracking-tight">{alert.symbol}</h3>
+                        <p className="text-[#8E9297] text-[11px] font-semibold mt-0.5">{alert.name}</p>
                         <p className="text-[#8E9297] text-[10px] font-bold uppercase tracking-widest mt-1">
                           Last Update: {alert.lastUpdated || 'Pending...'}
                         </p>
